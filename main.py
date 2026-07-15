@@ -38,8 +38,8 @@ ai_client = OpenAI(
     api_key=OPENROUTER_KEY,
 )
 
-# Configuration Variables - Using the absolute best 100% free vision model on OpenRouter
-MODEL_NAME = "google/gemini-2.0-flash-exp:free"
+# Configuration Variables - Points to the dynamic auto-router for free models
+MODEL_NAME = "openrouter/free"
 GLOBAL_INSTRUCTION = (
     "You are a highly capable, adaptive, and witty AI assistant running inside a Discord server. "
     "You are chatting with users in real-time. Keep your tone natural, engaging, and match the "
