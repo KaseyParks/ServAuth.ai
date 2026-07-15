@@ -5,6 +5,7 @@ from discord.ext import commands
 from openai import OpenAI
 from dotenv import load_dotenv
 import keep_alive  # Import keep-alive to register bot and run webserver
+import base64
 
 # 1. Load environment variables
 load_dotenv(dotenv_path=os.path.join(os.getcwd(), '.env'))
@@ -37,14 +38,31 @@ ai_client = OpenAI(
     api_key=OPENROUTER_KEY,
 )
 
-# Configuration Variables
-MODEL_NAME = "openai/gpt-oss-20b:free"
+# Configuration Variables - Using the absolute best 100% free vision model on OpenRouter
+MODEL_NAME = "google/gemini-2.0-flash-exp:free"
 GLOBAL_INSTRUCTION = (
     "You are a highly capable, adaptive, and witty AI assistant running inside a Discord server. "
     "You are chatting with users in real-time. Keep your tone natural, engaging, and match the "
     "energy of the users. Avoid sounding overly robotic, formal, or repetitive. You remember "
-    "the flow of the conversation up to your memory limit."
+    "the flow of the conversation up to your memory limit. If an image is provided in the message "
+    "history, use your vision capabilities to analyze it and discuss it naturally."
 )
+
+
+# Helper function to convert Discord attachments to Base64 data strings
+async def get_image_base64(attachment: discord.Attachment) -> str:
+    # Supported content types for OpenAI vision input
+    supported_types = ["image/jpeg", "image/png", "image/webp", "image/gif"]
+    if attachment.content_type not in supported_types:
+        return None
+    
+    try:
+        image_bytes = await attachment.read()
+        encoded = base64.b64encode(image_bytes).decode("utf-8")
+        return f"data:{attachment.content_type};base64,{encoded}"
+    except Exception as e:
+        print(f"Failed to process image attachment {attachment.filename}: {e}")
+        return None
 
 
 # ----------------------------------------------------------------
@@ -121,7 +139,7 @@ async def on_ready():
 
 
 # ----------------------------------------------------------------
-# CHAT LISTENER (Handles the auto-chat channel with 100-message memory)
+# CHAT LISTENER (Handles the auto-chat channel with image support)
 # ----------------------------------------------------------------
 @bot.event
 async def on_message(message):
@@ -145,18 +163,45 @@ async def on_message(message):
                 raw_messages.reverse()
 
                 for msg in raw_messages:
-                    if not msg.content or msg.content.startswith("/") or msg.content.startswith(bot.command_prefix):
+                    # Filter out slash commands, system actions, or empty messages with no attachments
+                    if msg.content.startswith("/") or msg.content.startswith(bot.command_prefix):
+                        continue
+                    if not msg.content and not msg.attachments:
                         continue
 
                     role = "assistant" if msg.author == bot.user else "user"
                     username = msg.author.name.replace(" ", "_")
 
-                    conversation_history.append({
-                        "role": role,
-                        "name": username,
-                        "content": msg.content
-                    })
+                    # If there are no images, we send standard text formatting
+                    if not msg.attachments:
+                        conversation_history.append({
+                            "role": role,
+                            "name": username,
+                            "content": msg.content
+                        })
+                    else:
+                        # Construct multi-modal payload
+                        content_list = []
+                        if msg.content:
+                            content_list.append({"type": "text", "text": msg.content})
 
+                        for attachment in msg.attachments:
+                            image_data_url = await get_image_base64(attachment)
+                            if image_data_url:
+                                content_list.append({
+                                    "type": "image_url",
+                                    "image_url": {"url": image_data_url}
+                                })
+
+                        # If we successfully parsed visual content, append as structured list
+                        if content_list:
+                            conversation_history.append({
+                                "role": role,
+                                "name": username,
+                                "content": content_list
+                            })
+
+                # Call OpenRouter with Multi-Modal capability
                 completion = ai_client.chat.completions.create(
                     extra_headers={
                         "HTTP-Referer": "https://localhost",
@@ -184,7 +229,7 @@ async def on_message(message):
 # ----------------------------------------------------------------
 # SLASH COMMAND: /prompt (Context-Aware with 45-message memory)
 # ----------------------------------------------------------------
-@bot.tree.command(name="prompt", description="Ask the AI a question using gpt-oss-20b (reads past 45 messages)")
+@bot.tree.command(name="prompt", description="Ask the AI a question using the active model (reads past 45 messages)")
 @app_commands.describe(question="The question or prompt you want to send to the AI")
 async def prompt(interaction: discord.Interaction, question: str):
     await interaction.response.defer()
@@ -199,18 +244,41 @@ async def prompt(interaction: discord.Interaction, question: str):
         raw_messages.reverse()
 
         for msg in raw_messages:
-            if not msg.content or msg.content.startswith("/") or msg.content.startswith(bot.command_prefix):
+            if msg.content.startswith("/") or msg.content.startswith(bot.command_prefix):
+                continue
+            if not msg.content and not msg.attachments:
                 continue
 
             role = "assistant" if msg.author == bot.user else "user"
             username = msg.author.name.replace(" ", "_")
 
-            conversation_history.append({
-                "role": role,
-                "name": username,
-                "content": msg.content
-            })
+            if not msg.attachments:
+                conversation_history.append({
+                    "role": role,
+                    "name": username,
+                    "content": msg.content
+                })
+            else:
+                content_list = []
+                if msg.content:
+                    content_list.append({"type": "text", "text": msg.content})
 
+                for attachment in msg.attachments:
+                    image_data_url = await get_image_base64(attachment)
+                    if image_data_url:
+                        content_list.append({
+                            "type": "image_url",
+                            "image_url": {"url": image_data_url}
+                        })
+
+                if content_list:
+                    conversation_history.append({
+                        "role": role,
+                        "name": username,
+                        "content": content_list
+                    })
+
+        # Append the final explicit user query to the payload
         conversation_history.append({"role": "user", "content": question})
 
         completion = ai_client.chat.completions.create(
@@ -278,8 +346,8 @@ async def help_command(interaction: discord.Interaction):
         name="🧠 AI Features",
         value=(
             "**Auto-Chat Channel**\n"
-            f"Send a regular message in {ai_channel_display} and I will respond! "
-            "I remember up to **100 messages** of conversation history.\n\n"
+            f"Send a regular message or drop an image in {ai_channel_display} and I will respond! "
+            "I remember up to **100 messages** of conversation history and analyze images.\n\n"
             "**Slash Command Prompt**\n"
             "Use `/prompt` to query me from any channel! I read up to **45 messages** of channel context."
         ),
@@ -289,7 +357,7 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(
         name="⚙️ Slash Commands (/) ",
         value=(
-            "**`/prompt [question]`** - Ask the AI a question using the `gpt-oss-20b` model.\n"
+            "**`/prompt [question]`** - Ask the AI a question using the active model.\n"
             "**`/clear [amount]`** - Purge up to 1000 messages in the channel. (Requires *Manage Messages*)\n"
             "**`/help`** - Shows this help menu."
         ),
@@ -305,7 +373,7 @@ async def help_command(interaction: discord.Interaction):
         inline=False
     )
 
-    embed.set_footer(text="OpenRouter Powered • gpt-oss-20b")
+    embed.set_footer(text=f"OpenRouter Powered • {MODEL_NAME}")
     await interaction.response.send_message(embed=embed)
 
 
@@ -329,7 +397,7 @@ async def about(ctx):
         color=discord.Color.from_rgb(139, 90, 43)
     )
     embed.add_field(name="Command Prefix", value="`!`", inline=True)
-    embed.add_field(name="Engine", value="`gpt-oss-20b`", inline=True)
+    embed.add_field(name="Engine", value=f"`{MODEL_NAME}`", inline=True)
 
     gif_url = "https://files.catbox.moe/7xiuy9.gif"
     if gif_url:
