@@ -4,7 +4,7 @@ import asyncio
 
 app = Flask('')
 discord_bot = None  # We will pass the bot instance here from main.py
-getenv Channel_ID = (LOG_CHANNEL_ID)  # <-- REPLACE THIS with your actual Discord Channel ID
+Channel_ID = os.getenv(LOG_CHANNEL_ID)  # <-- REPLACE THIS with your actual Discord Channel ID
 
 @app.route('/')
 def home():
@@ -29,7 +29,7 @@ def log_api():
     return {"status": "logged", "event": event_name}, 200
 
 async def send_log_to_discord(event_name, details):
-    channel = discord_bot.get_channel(LOG_CHANNEL_ID)
+    channel = discord_bot.get_channel(Channel_ID)
     if channel:
         import discord
         embed = discord.Embed(
