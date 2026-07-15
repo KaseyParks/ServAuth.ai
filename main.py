@@ -4,26 +4,30 @@ from discord import app_commands
 from discord.ext import commands
 from openai import OpenAI
 from dotenv import load_dotenv
-import keep_alive  # Import the module to configure it properly
+import keep_alive  # Import keep-alive to register bot and run webserver
 
-# 1. Load environment variables first
+# 1. Load environment variables
 load_dotenv(dotenv_path=os.path.join(os.getcwd(), '.env'))
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY")
 
-# Troubleshooting fallback checks
 if not OPENROUTER_KEY:
     print("❌ ERROR: OPENROUTER_API_KEY not found in your .env file!")
 if not DISCORD_TOKEN:
     print("❌ ERROR: DISCORD_TOKEN not found in your .env file!")
 
-# 2. Set up Discord bot intents and initialize once
+# 2. Set up Discord bot intents
 intents = discord.Intents.default()
 intents.message_content = True
+intents.guilds = True  # Required to manage channels and categories
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# 3. Start the web server immediately and pass the bot instance
+# Dynamically store active IDs so the web server can find them if they change
+bot.dynamic_log_channel_id = None
+bot.dynamic_ai_chat_channel_id = None
+
+# 3. Start the web server immediately
 keep_alive.discord_bot = bot
 keep_alive.keep_alive()
 
@@ -34,10 +38,7 @@ ai_client = OpenAI(
 )
 
 # Configuration Variables
-AI_CHAT_CHANNEL_ID = 1525982227790565546
 MODEL_NAME = "openai/gpt-oss-20b:free"
-
-# Global Instruction (System Prompt)
 GLOBAL_INSTRUCTION = (
     "You are a highly capable, adaptive, and witty AI assistant running inside a Discord server. "
     "You are chatting with users in real-time. Keep your tone natural, engaging, and match the "
@@ -47,11 +48,70 @@ GLOBAL_INSTRUCTION = (
 
 
 # ----------------------------------------------------------------
-# SYNCING SLASH COMMANDS
+# ADVANCED AUTO-SETUP ON READY
 # ----------------------------------------------------------------
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user.name} (ID: {bot.user.id})")
+    
+    # Run auto-setup configuration for every guild the bot is currently in
+    for guild in bot.guilds:
+        print(f"Checking configuration for server: {guild.name}...")
+        
+        # 1. Check or create "DevC" Category
+        category = discord.utils.get(guild.categories, name="DevC")
+        if not category:
+            try:
+                category = await guild.create_category(name="DevC")
+                print(f"✅ Created 'DevC' Category in {guild.name}")
+            except Exception as e:
+                print(f"❌ Failed to create category in {guild.name}: {e}")
+                continue
+
+        # 2. Check or create Log Channel (Admin-Only)
+        log_channel = discord.utils.get(guild.text_channels, name="servauth-logs")
+        if not log_channel:
+            try:
+                # Set permissions: Only Admins can view this channel
+                overwrites = {
+                    guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                    guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+                }
+                # Grant access to anyone who has manage_channels
+                for role in guild.roles:
+                    if role.permissions.manage_channels or role.permissions.administrator:
+                        overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+
+                log_channel = await guild.create_text_channel(
+                    name="servauth-logs", 
+                    category=category,
+                    overwrites=overwrites,
+                    topic="Raw system API logs and execution outputs."
+                )
+                print(f"✅ Created private log channel '#servauth-logs' in {guild.name}")
+            except Exception as e:
+                print(f"❌ Failed to create log channel in {guild.name}: {e}")
+                
+        if log_channel:
+            bot.dynamic_log_channel_id = log_channel.id
+
+        # 3. Check or create "ai-chat" channel
+        ai_channel = discord.utils.get(guild.text_channels, name="ai-chat")
+        if not ai_channel:
+            try:
+                ai_channel = await guild.create_text_channel(
+                    name="ai-chat", 
+                    category=category,
+                    topic="Talk with ServAuth here! Fully powered by custom AI."
+                )
+                print(f"✅ Created public channel '#ai-chat' in {guild.name}")
+            except Exception as e:
+                print(f"❌ Failed to create '#ai-chat' in {guild.name}: {e}")
+                
+        if ai_channel:
+            bot.dynamic_ai_chat_channel_id = ai_channel.id
+
+    # Sync Slash Commands
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} slash command(s) successfully.")
@@ -65,33 +125,26 @@ async def on_ready():
 # ----------------------------------------------------------------
 @bot.event
 async def on_message(message):
-    # Never reply to our own bot messages
     if message.author == bot.user:
         return
 
-    # IGNORE COMMANDS: If a message starts with '/' or '!', the AI completely ignores it
     if message.content.startswith("/") or message.content.startswith(bot.command_prefix):
         await bot.process_commands(message)
         return
 
-    # 1. Detect if a message is sent in the designated ai-chat channel
-    if message.channel.id == AI_CHAT_CHANNEL_ID:
+    # Check against the dynamically verified AI chat channel ID
+    if bot.dynamic_ai_chat_channel_id and message.channel.id == bot.dynamic_ai_chat_channel_id:
         async with message.channel.typing():
             try:
-                # Start history with the global instruction
                 conversation_history = [{"role": "system", "content": GLOBAL_INSTRUCTION}]
 
-                # Fetch the last 100 messages in this channel
                 raw_messages = []
                 async for msg in message.channel.history(limit=100):
                     raw_messages.append(msg)
 
-                # Reverse them so they are in chronological order (oldest to newest)
                 raw_messages.reverse()
 
-                # Process the chronological history
                 for msg in raw_messages:
-                    # Ignore empty messages, system pins, embeds, and ANY commands (starting with / or !)
                     if not msg.content or msg.content.startswith("/") or msg.content.startswith(bot.command_prefix):
                         continue
 
@@ -104,7 +157,6 @@ async def on_message(message):
                         "content": msg.content
                     })
 
-                # Call OpenRouter
                 completion = ai_client.chat.completions.create(
                     extra_headers={
                         "HTTP-Referer": "https://localhost",
@@ -126,7 +178,6 @@ async def on_message(message):
                 await message.reply("My brain just lagged out. Send another message to try again!")
         return
 
-    # Let normal prefix commands work in all other channels
     await bot.process_commands(message)
 
 
@@ -139,19 +190,15 @@ async def prompt(interaction: discord.Interaction, question: str):
     await interaction.response.defer()
 
     try:
-        # Start history with the global instruction
         conversation_history = [{"role": "system", "content": GLOBAL_INSTRUCTION}]
 
-        # Fetch the last 45 messages in this channel
         raw_messages = []
         async for msg in interaction.channel.history(limit=45):
             raw_messages.append(msg)
 
-        # Reverse them so they are chronological
         raw_messages.reverse()
 
         for msg in raw_messages:
-            # Skip empty messages and any commands starting with / or !
             if not msg.content or msg.content.startswith("/") or msg.content.startswith(bot.command_prefix):
                 continue
 
@@ -164,10 +211,8 @@ async def prompt(interaction: discord.Interaction, question: str):
                 "content": msg.content
             })
 
-        # Append the current active user prompt at the absolute end of the history
         conversation_history.append({"role": "user", "content": question})
 
-        # Call OpenRouter
         completion = ai_client.chat.completions.create(
             extra_headers={
                 "HTTP-Referer": "https://localhost",
@@ -196,16 +241,13 @@ async def prompt(interaction: discord.Interaction, question: str):
                   description="Deletes up to 1000 messages (skips messages older than 14 days to prevent lag)")
 @app_commands.describe(amount="The number of messages to delete (default: 1000)")
 async def clear(interaction: discord.Interaction, amount: int = 1000):
-    # Only allow users with Manage Messages permission to use this
     if not interaction.user.guild_permissions.manage_messages:
         await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
         return
 
-    # Defer ephemerally so the "thinking..." response is only visible to the user cleaning up
     await interaction.response.defer(ephemeral=True)
 
     try:
-        # bulk=True tells the bot to ONLY delete messages under 14 days old.
         deleted = await interaction.channel.purge(limit=amount, bulk=True)
 
         await interaction.followup.send(
@@ -218,23 +260,25 @@ async def clear(interaction: discord.Interaction, amount: int = 1000):
         await interaction.followup.send("Failed to clear messages. Make sure I have 'Manage Messages' permission!",
                                         ephemeral=True)
 
+
 # ----------------------------------------------------------------
 # SLASH COMMAND: /help
 # ----------------------------------------------------------------
 @bot.tree.command(name="help", description="Displays all available commands and features")
 async def help_command(interaction: discord.Interaction):
+    ai_channel_display = f"<#{bot.dynamic_ai_chat_channel_id}>" if bot.dynamic_ai_chat_channel_id else "`#ai-chat`"
+    
     embed = discord.Embed(
         title="🤖 Custom AI Bot Help Menu",
         description="Here is everything I can do. Designed with zero limitations.",
         color=discord.Color.purple()
     )
 
-    # AI Features
     embed.add_field(
         name="🧠 AI Features",
         value=(
             "**Auto-Chat Channel**\n"
-            f"Send a regular message in <#{AI_CHAT_CHANNEL_ID}> and I will respond! "
+            f"Send a regular message in {ai_channel_display} and I will respond! "
             "I remember up to **100 messages** of conversation history.\n\n"
             "**Slash Command Prompt**\n"
             "Use `/prompt` to query me from any channel! I read up to **45 messages** of channel context."
@@ -242,7 +286,6 @@ async def help_command(interaction: discord.Interaction):
         inline=False
     )
 
-    # Slash Commands
     embed.add_field(
         name="⚙️ Slash Commands (/) ",
         value=(
@@ -253,7 +296,6 @@ async def help_command(interaction: discord.Interaction):
         inline=False
     )
 
-    # Legacy / Prefix commands
     embed.add_field(
         name="⚡ Prefix Commands (!)",
         value=(
@@ -264,7 +306,6 @@ async def help_command(interaction: discord.Interaction):
     )
 
     embed.set_footer(text="OpenRouter Powered • gpt-oss-20b")
-
     await interaction.response.send_message(embed=embed)
 
 
@@ -285,7 +326,7 @@ async def about(ctx):
             "I'm ServAuth, a custom AI-powered bot built with Python and OpenRouter.\n"
             "Operating with zero bloat and absolute flexibility."
         ),
-        color=discord.Color.from_rgb(139, 90, 43)  # Matches your custom brand color!
+        color=discord.Color.from_rgb(139, 90, 43)
     )
     embed.add_field(name="Command Prefix", value="`!`", inline=True)
     embed.add_field(name="Engine", value="`gpt-oss-20b`", inline=True)
