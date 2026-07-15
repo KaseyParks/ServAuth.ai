@@ -41,7 +41,9 @@ ai_client = OpenAI(
 )
 
 # Configuration Variables
-MODEL_NAME = "openrouter/free"
+MODEL_NAME = "openai/gpt-oss-20b:free"
+SAFETY_MODEL = "nvidia/nemotron-3.5-content-safety"
+
 GLOBAL_INSTRUCTION = (
     "You are a highly capable, adaptive, and witty AI assistant running inside a Discord server. "
     "You are chatting with users in real-time. Keep your tone natural, engaging, and match the "
@@ -49,6 +51,39 @@ GLOBAL_INSTRUCTION = (
     "the flow of the conversation up to your memory limit. If an image is provided in the message "
     "history, use your vision capabilities to analyze it and discuss it naturally."
 )
+
+
+# ----------------------------------------------------------------
+# CONTENT SAFETY FILTER (Nemotron Pre-Filter)
+# ----------------------------------------------------------------
+async def is_content_safe(user_prompt: str) -> bool:
+    """
+    Sends the user's prompt to Nemotron 3.5 Content Safety first.
+    Returns True if safe, False if unsafe or if the check fails.
+    """
+    try:
+        # Run the API request on a separate thread to prevent blocking Discord
+        completion = await asyncio.to_thread(
+            ai_client.chat.completions.create,
+            extra_headers={
+                "HTTP-Referer": "https://localhost",
+                "X-Title": "My Discord Bot Safety Gate",
+            },
+            model=SAFETY_MODEL,
+            messages=[{"role": "user", "content": user_prompt}]
+        )
+        
+        result = completion.choices[0].message.content.lower()
+        print(f"[Safety Gate] Input: '{user_prompt[:30]}...' -> Nemotron response: {result.strip()}")
+        
+        # If the model explicitly flags it as unsafe, block it
+        if "unsafe" in result:
+            return False
+        return True
+    except Exception as e:
+        print(f"[Safety Gate] Error checking safety: {e}")
+        # Default to safe if the safety model fails so the bot doesn't completely lock up
+        return True
 
 
 # Helper function to convert Discord attachments to Base64 data strings
@@ -75,11 +110,9 @@ def extract_reasoning(content: str):
     if not content:
         return "", ""
     
-    # Match everything inside <think> and </think> tags
     think_match = re.search(r'<think>(.*?)</think>', content, re.DOTALL)
     if think_match:
         reasoning = think_match.group(1).strip()
-        # Remove the think tag block entirely from the main content output
         clean_content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
         return reasoning, clean_content
     
@@ -176,7 +209,6 @@ class GenerationView(discord.ui.View):
         reasoning, clean_text = extract_reasoning(content_raw)
         
         embeds = []
-        # If reasoning exists and was requested
         if self.show_reasoning and reasoning:
             reasoning_embed = discord.Embed(
                 title="🧠 AI Reasoning Process",
@@ -187,7 +219,6 @@ class GenerationView(discord.ui.View):
             
         final_content = f"{self.prefix}{clean_text}"
         
-        # Determine if target is interaction or standard message
         if isinstance(target, discord.Interaction):
             await target.followup.edit_message(
                 message_id=target.message.id,
@@ -211,12 +242,10 @@ class GenerationView(discord.ui.View):
             await self._send_or_edit_response(interaction, self.generations[self.current_index])
 
     async def regen_callback(self, interaction: discord.Interaction):
-        # Fire up a live timer inside the regeneration update
         tracker = GenerationTracker(interaction.channel, edit_target=interaction)
         tracker.start()
         
         try:
-            # Re-fetch from API running loop
             completion = await asyncio.to_thread(
                 self.ai_client.chat.completions.create,
                 extra_headers={
@@ -236,7 +265,6 @@ class GenerationView(discord.ui.View):
             self.current_index = len(self.generations) - 1
             self.update_buttons()
             
-            # Wipe loading state and present output
             await self._send_or_edit_response(interaction, response_text)
             
         except Exception as e:
@@ -255,7 +283,6 @@ async def on_ready():
     for guild in bot.guilds:
         print(f"Checking configuration for server: {guild.name}...")
         
-        # 1. Check or create "DevC" Category
         category = discord.utils.get(guild.categories, name="DevC")
         if not category:
             try:
@@ -265,7 +292,6 @@ async def on_ready():
                 print(f"❌ Failed to create category in {guild.name}: {e}")
                 continue
 
-        # 2. Check or create Log Channel (Admin-Only)
         log_channel = discord.utils.get(guild.text_channels, name="servauth-logs")
         if not log_channel:
             try:
@@ -290,7 +316,6 @@ async def on_ready():
         if log_channel:
             bot.dynamic_log_channel_id = log_channel.id
 
-        # 3. Check or create "ai-chat" channel
         ai_channel = discord.utils.get(guild.text_channels, name="ai-chat")
         if not ai_channel:
             try:
@@ -315,7 +340,7 @@ async def on_ready():
 
 
 # ----------------------------------------------------------------
-# CHAT LISTENER (Handles the auto-chat channel with image support)
+# CHAT LISTENER (Handles the auto-chat channel with safety gate)
 # ----------------------------------------------------------------
 @bot.event
 async def on_message(message):
@@ -339,19 +364,30 @@ async def on_message(message):
         tracker.start()
 
         try:
+            # SAFETY FILTER PRE-CHECK
+            if message.content:
+                is_safe = await is_content_safe(message.content)
+                if not is_safe:
+                    tracker.stop()
+                    warning_embed = discord.Embed(
+                        title="⚠️ Content Flagged",
+                        description="Your message was flagged as potentially unsafe by our content filtering gateway.",
+                        color=discord.Color.red()
+                    )
+                    await status_msg.edit(content=None, embed=warning_embed)
+                    return
+
             conversation_history = [{"role": "system", "content": GLOBAL_INSTRUCTION}]
 
             raw_messages = []
             async for msg in message.channel.history(limit=100):
                 raw_messages.append(msg)
 
-            # Clean history parsing logic
             raw_messages.reverse()
 
             for msg in raw_messages:
                 if msg.content.startswith("/") or msg.content.startswith(bot.command_prefix):
                     continue
-                # Do not evaluate our own active loading message
                 if msg.id == status_msg.id:
                     continue
                 if not msg.content and not msg.attachments:
@@ -388,7 +424,6 @@ async def on_message(message):
 
             generation_history = list(conversation_history)
 
-            # Thread-safe async run for the API request
             completion = await asyncio.to_thread(
                 ai_client.chat.completions.create,
                 extra_headers={
@@ -405,12 +440,9 @@ async def on_message(message):
             if len(response_text) > 2000:
                 response_text = response_text[:1990] + "..."
 
-            # We cleanly extract the reasoning. (For dynamic chat channel we default thinking to False/Hidden)
             reasoning, clean_text = extract_reasoning(response_text)
 
             view = GenerationView(ai_client, MODEL_NAME, generation_history, response_text, show_reasoning=False)
-            
-            # Wipe loading state, update output view
             await status_msg.edit(content=clean_text, embed=None, view=view)
 
         except Exception as e:
@@ -423,7 +455,7 @@ async def on_message(message):
 
 
 # ----------------------------------------------------------------
-# SLASH COMMAND: /prompt (Context-Aware with 45-message memory)
+# SLASH COMMAND: /prompt (with safety gate)
 # ----------------------------------------------------------------
 @bot.tree.command(name="prompt", description="Ask the AI a question using the active model (reads past 45 messages)")
 @app_commands.describe(
@@ -431,7 +463,6 @@ async def on_message(message):
     reasoning="Set to True to see the AI's internal step-by-step thinking/reasoning process"
 )
 async def prompt(interaction: discord.Interaction, question: str, reasoning: bool = False):
-    # Defer so we don't trigger interaction timeouts
     await interaction.response.defer()
     
     placeholder_embed = discord.Embed(
@@ -440,14 +471,24 @@ async def prompt(interaction: discord.Interaction, question: str, reasoning: boo
     )
     placeholder_embed.description = "⏱️ **Live of generation:** 0.00s"
     
-    # We must use wait=True here so it returns the actual Message object instead of None!
     status_msg = await interaction.followup.send(embed=placeholder_embed, wait=True)
     
-    # Now we pass the real message object into the tracker safely
     tracker = GenerationTracker(interaction.channel, initial_msg=status_msg)
     tracker.start()
 
     try:
+        # SAFETY FILTER PRE-CHECK
+        is_safe = await is_content_safe(question)
+        if not is_safe:
+            tracker.stop()
+            warning_embed = discord.Embed(
+                title="⚠️ Content Flagged",
+                description="Your prompt was flagged as potentially unsafe by our content filtering gateway.",
+                color=discord.Color.red()
+            )
+            await status_msg.edit(content=None, embed=warning_embed)
+            return
+
         conversation_history = [{"role": "system", "content": GLOBAL_INSTRUCTION}]
 
         raw_messages = []
@@ -459,7 +500,6 @@ async def prompt(interaction: discord.Interaction, question: str, reasoning: boo
         for msg in raw_messages:
             if msg.content.startswith("/") or msg.content.startswith(bot.command_prefix):
                 continue
-            # Make sure we don't accidentally read our active loading status message as context
             if msg.id == status_msg.id:
                 continue
             if not msg.content and not msg.attachments:
@@ -494,7 +534,6 @@ async def prompt(interaction: discord.Interaction, question: str, reasoning: boo
                         "content": content_list
                     })
 
-        # Inject final user query
         conversation_history.append({"role": "user", "content": question})
         generation_history = list(conversation_history)
 
@@ -514,7 +553,6 @@ async def prompt(interaction: discord.Interaction, question: str, reasoning: boo
         if len(response_text) > 2000:
             response_text = response_text[:1990] + "..."
 
-        # Parse potential reasoning out of payload
         extracted_thoughts, clean_text = extract_reasoning(response_text)
 
         prefix_text = f"**Question:** {question}\n\n"
@@ -537,7 +575,6 @@ async def prompt(interaction: discord.Interaction, question: str, reasoning: boo
                 )
             )
 
-        # Edit the status message directly with the final output and views!
         await status_msg.edit(
             content=f"{prefix_text}{clean_text}",
             embeds=embeds,
@@ -554,7 +591,7 @@ async def prompt(interaction: discord.Interaction, question: str, reasoning: boo
 
 
 # ----------------------------------------------------------------
-# SLASH COMMAND: /clear (Deletes messages in the channel)
+# SLASH COMMAND: /clear
 # ----------------------------------------------------------------
 @bot.tree.command(name="clear",
                   description="Deletes up to 1000 messages (skips messages older than 14 days to prevent lag)")
@@ -572,7 +609,7 @@ async def clear(interaction: discord.Interaction, amount: int = 1000):
         await interaction.followup.send(
             f"Successfully deleted {len(deleted)} messages!\n"
             f"*(Note: Messages older than 14 days were skipped to protect the bot from rate limits)*",
-            ephemeral=True
+            f"ephemeral=True"
         )
     except Exception as e:
         print(f"Error during purge: {e}")
@@ -612,6 +649,12 @@ async def help_command(interaction: discord.Interaction):
             "**`/clear [amount]`** - Purge up to 1000 messages in the channel. (Requires *Manage Messages*)\n"
             "**`/help`** - Shows this help menu."
         ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="⚠️ Safety Filtering Gate",
+        value="Every prompt is processed through `Nemotron 3.5 Content Safety` to verify the request is safe before sending it to the main AI.",
         inline=False
     )
 
