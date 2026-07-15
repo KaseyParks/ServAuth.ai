@@ -4,7 +4,7 @@ import asyncio
 
 app = Flask('')
 discord_bot = None  # We will pass the bot instance here from main.py
-LOG_CHANNEL_ID = 1526784173887717497  # <-- REPLACE THIS with your actual Discord Channel ID
+getenv Channel_ID = (LOG_CHANNEL_ID)  # <-- REPLACE THIS with your actual Discord Channel ID
 
 @app.route('/')
 def home():
