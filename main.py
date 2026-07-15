@@ -440,10 +440,11 @@ async def prompt(interaction: discord.Interaction, question: str, reasoning: boo
     )
     placeholder_embed.description = "⏱️ **Live of generation:** 0.00s"
     
-    # Push immediate placeholder tracking
-    await interaction.followup.send(embed=placeholder_embed)
+    # We must use wait=True here so it returns the actual Message object instead of None!
+    status_msg = await interaction.followup.send(embed=placeholder_embed, wait=True)
     
-    tracker = GenerationTracker(interaction.channel, edit_target=interaction)
+    # Now we pass the real message object into the tracker safely
+    tracker = GenerationTracker(interaction.channel, initial_msg=status_msg)
     tracker.start()
 
     try:
@@ -457,6 +458,9 @@ async def prompt(interaction: discord.Interaction, question: str, reasoning: boo
 
         for msg in raw_messages:
             if msg.content.startswith("/") or msg.content.startswith(bot.command_prefix):
+                continue
+            # Make sure we don't accidentally read our active loading status message as context
+            if msg.id == status_msg.id:
                 continue
             if not msg.content and not msg.attachments:
                 continue
@@ -524,7 +528,6 @@ async def prompt(interaction: discord.Interaction, question: str, reasoning: boo
         )
         
         embeds = []
-        # Compile secondary reasoning embed if enabled
         if reasoning and extracted_thoughts:
             embeds.append(
                 discord.Embed(
@@ -534,8 +537,8 @@ async def prompt(interaction: discord.Interaction, question: str, reasoning: boo
                 )
             )
 
-        await interaction.followup.edit_message(
-            message_id=interaction.message.id,
+        # Edit the status message directly with the final output and views!
+        await status_msg.edit(
             content=f"{prefix_text}{clean_text}",
             embeds=embeds,
             view=view
@@ -544,8 +547,7 @@ async def prompt(interaction: discord.Interaction, question: str, reasoning: boo
     except Exception as e:
         tracker.stop()
         print(f"Error calling OpenRouter: {e}")
-        await interaction.followup.edit_message(
-            message_id=interaction.message.id,
+        await status_msg.edit(
             content="My neural pathways got blocked. Try asking again!",
             embed=None
         )
