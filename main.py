@@ -4,7 +4,12 @@ from discord import app_commands
 from discord.ext import commands
 from openai import OpenAI
 from dotenv import load_dotenv
+from keep_alive import keep_alive  # Import the keep-alive server
 
+# Start the web server immediately before starting the bot
+keep_alive()
+
+# ... (rest of your main.py code stays exactly the same)
 # Force-load the .env file from the current working directory
 load_dotenv(dotenv_path=os.path.join(os.getcwd(), '.env'))
 
