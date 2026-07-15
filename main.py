@@ -6,7 +6,12 @@ from openai import OpenAI
 from dotenv import load_dotenv
 from keep_alive import keep_alive  # Import the keep-alive server
 
+# Initialize bot as you usually do
+bot = commands.Bot(command_prefix="!", intents=intents)
+
 # Start the web server immediately before starting the bot
+keep_alive.discord_bot = bot
+keep_alive.keep_alive()
 keep_alive()
 
 # ... (rest of your main.py code stays exactly the same)
