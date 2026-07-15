@@ -4,39 +4,34 @@ from discord import app_commands
 from discord.ext import commands
 from openai import OpenAI
 from dotenv import load_dotenv
-from keep_alive import keep_alive  # Import the keep-alive server
+import keep_alive  # Import the module to configure it properly
 
-# Initialize bot as you usually do
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-# Start the web server immediately before starting the bot
-keep_alive.discord_bot = bot
-keep_alive.keep_alive()
-keep_alive()
-
-# ... (rest of your main.py code stays exactly the same)
-# Force-load the .env file from the current working directory
+# 1. Load environment variables first
 load_dotenv(dotenv_path=os.path.join(os.getcwd(), '.env'))
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY")
 
-# Troubleshooting fallback check
+# Troubleshooting fallback checks
 if not OPENROUTER_KEY:
     print("❌ ERROR: OPENROUTER_API_KEY not found in your .env file!")
 if not DISCORD_TOKEN:
     print("❌ ERROR: DISCORD_TOKEN not found in your .env file!")
+
+# 2. Set up Discord bot intents and initialize once
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# 3. Start the web server immediately and pass the bot instance
+keep_alive.discord_bot = bot
+keep_alive.keep_alive()
 
 # Set up the OpenAI client pointing to OpenRouter
 ai_client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_KEY,
 )
-
-# Set up Discord bot intents
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Configuration Variables
 AI_CHAT_CHANNEL_ID = 1525982227790565546
@@ -197,9 +192,6 @@ async def prompt(interaction: discord.Interaction, question: str):
 # ----------------------------------------------------------------
 # SLASH COMMAND: /clear (Deletes messages in the channel)
 # ----------------------------------------------------------------
-# ----------------------------------------------------------------
-# SLASH COMMAND: /clear (Deletes messages in the channel)
-# ----------------------------------------------------------------
 @bot.tree.command(name="clear",
                   description="Deletes up to 1000 messages (skips messages older than 14 days to prevent lag)")
 @app_commands.describe(amount="The number of messages to delete (default: 1000)")
@@ -214,7 +206,6 @@ async def clear(interaction: discord.Interaction, amount: int = 1000):
 
     try:
         # bulk=True tells the bot to ONLY delete messages under 14 days old.
-        # This completely prevents the slow single-delete rate-limiting freeze!
         deleted = await interaction.channel.purge(limit=amount, bulk=True)
 
         await interaction.followup.send(
@@ -274,7 +265,6 @@ async def help_command(interaction: discord.Interaction):
 
     embed.set_footer(text="OpenRouter Powered • gpt-oss-20b")
 
-    # We send this non-ephemerally so everyone can see the help menu, but you can add ephemeral=True if you prefer!
     await interaction.response.send_message(embed=embed)
 
 
@@ -300,11 +290,8 @@ async def about(ctx):
     embed.add_field(name="Command Prefix", value="`!`", inline=True)
     embed.add_field(name="Engine", value="`gpt-oss-20b`", inline=True)
 
-    # Paste the direct Discord media link to your Scene-1.gif here!
-    # e.g., "https://cdn.discordapp.com/attachments/..."
     gif_url = "https://files.catbox.moe/7xiuy9.gif"
-
-    if gif_url != ("https://files.catbox.moe/7xiuy9.gif"):
+    if gif_url:
         embed.set_image(url=gif_url)
 
     await ctx.send(embed=embed)
