@@ -3,17 +3,17 @@ from threading import Thread
 import asyncio
 import os
 import logging
+import time
+import requests
 
 app = Flask('')
 discord_bot = None  # Passed from main.py
 
-# This is a fallback helper to find the active log channel ID (either from .env or dynamically discovered)
+# This is a fallback helper to find the active log channel ID
 def get_log_channel_id():
-    # If the main bot script found or created a log channel, use that dynamic ID first
     if discord_bot and hasattr(discord_bot, 'dynamic_log_channel_id') and discord_bot.dynamic_log_channel_id:
         return discord_bot.dynamic_log_channel_id
     
-    # Otherwise, fall back to the .env file
     channel_env = os.getenv("LOG_CHANNEL_ID")
     return int(channel_env) if channel_env and channel_env.isdigit() else None
 
@@ -28,7 +28,6 @@ async def send_literal_log_to_discord(log_message):
 
     channel = discord_bot.get_channel(channel_id)
     if channel:
-        # Wrap it in a code block with log syntax highlighting
         formatted_log = f"```log\n{log_message}\n```"
         await channel.send(formatted_log)
 
@@ -76,7 +75,33 @@ def log_api():
 def run():
     app.run(host='0.0.0.0', port=8080)
 
+
+def ping_loop():
+    # Wait 5 seconds for the server to actually start up before we start pinging
+    time.sleep(5)
+    
+    # Grab the public Render URL, default to localhost if not set
+    url = os.getenv("RENDER_EXTERNAL_URL") or "http://127.0.0.1:8080/"
+    print(f"[Keep Alive] Pinging target initialized: {url}")
+    
+    while True:
+        try:
+            response = requests.get(url)
+            # Just print to terminal so it doesn't spam your Discord log channel
+            print(f"[Keep Alive] Ping sent to {url}. Response: {response.status_code}")
+        except Exception as e:
+            print(f"[Keep Alive] Ping failed: {e}")
+            
+        time.sleep(30)
+
+
 def keep_alive():
-    t = Thread(target=run)
-    t.daemon = True
-    t.start()
+    # Thread for the Flask web server
+    server_thread = Thread(target=run)
+    server_thread.daemon = True
+    server_thread.start()
+    
+    # Thread for the 30-second ping loop
+    ping_thread = Thread(target=ping_loop)
+    ping_thread.daemon = True
+    ping_thread.start()
