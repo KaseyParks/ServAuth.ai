@@ -1,6 +1,6 @@
 discord.py
-openai
 python-dotenv
 flask
 gunicorn
 requests
+aiohttp
